@@ -228,6 +228,12 @@ url = "http://localhost:8001"
 headers = { "X-API-Key" = "my_api_key" }
 
 [[mcp_servers]]
+name = "my_sse_server"
+transport = "sse"
+url = "http://localhost:8002/sse-endpoint"
+headers = { "Authorization" = "Bearer my_sse_token" }
+
+[[mcp_servers]]
 name = "fetch_server"
 transport = "stdio"
 command = "uvx"
@@ -238,6 +244,7 @@ Supported transports:
 
 - `http`: Standard HTTP transport
 - `streamable-http`: HTTP transport with streaming support
+- `sse`: Server-Sent Events (SSE) transport for real-time updates
 - `stdio`: Standard input/output transport (for local processes)
 
 Key fields:

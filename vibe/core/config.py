@@ -202,6 +202,10 @@ class MCPStreamableHttp(_MCPBase, _MCPHttpFields):
     transport: Literal["streamable-http"]
 
 
+class MCPSse(_MCPBase, _MCPHttpFields):
+    transport: Literal["sse"]
+
+
 class MCPStdio(_MCPBase):
     transport: Literal["stdio"]
     command: str | list[str]
@@ -217,7 +221,7 @@ class MCPStdio(_MCPBase):
 
 
 MCPServer = Annotated[
-    MCPHttp | MCPStreamableHttp | MCPStdio, Field(discriminator="transport")
+    MCPHttp | MCPStreamableHttp | MCPSse | MCPStdio, Field(discriminator="transport")
 ]
 
 

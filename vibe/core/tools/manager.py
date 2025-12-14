@@ -15,8 +15,10 @@ from vibe.core.tools.base import BaseTool, BaseToolConfig
 from vibe.core.tools.mcp import (
     RemoteTool,
     create_mcp_http_proxy_tool_class,
+    create_mcp_sse_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
     list_tools_http,
+    list_tools_sse,
     list_tools_stdio,
 )
 from vibe.core.utils import run_sync
@@ -24,7 +26,7 @@ from vibe.core.utils import run_sync
 logger = getLogger("vibe")
 
 if TYPE_CHECKING:
-    from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
+    from vibe.core.config import MCPHttp, MCPSse, MCPStdio, MCPStreamableHttp, VibeConfig
 
 
 class NoSuchToolError(Exception):
@@ -141,21 +143,25 @@ class ToolManager:
     async def _integrate_mcp_async(self) -> None:
         try:
             http_count = 0
+            sse_count = 0
             stdio_count = 0
 
             for srv in self._config.mcp_servers:
                 match srv.transport:
                     case "http" | "streamable-http":
                         http_count += await self._register_http_server(srv)
+                    case "sse":
+                        sse_count += await self._register_sse_server(srv)
                     case "stdio":
                         stdio_count += await self._register_stdio_server(srv)
                     case _:
                         logger.warning("Unsupported MCP transport: %r", srv.transport)
 
             logger.info(
-                "MCP integration registered %d tools (http=%d, stdio=%d)",
-                http_count + stdio_count,
+                "MCP integration registered %d tools (http=%d, sse=%d, stdio=%d)",
+                http_count + sse_count + stdio_count,
                 http_count,
+                sse_count,
                 stdio_count,
             )
         except Exception as exc:
@@ -220,6 +226,40 @@ class ToolManager:
                     "Failed to register MCP stdio tool '%s' from %r: %r",
                     getattr(remote, "name", "<unknown>"),
                     cmd,
+                    exc,
+                )
+        return added
+
+    async def _register_sse_server(self, srv: MCPSse) -> int:
+        url = (srv.url or "").strip()
+        if not url:
+            logger.warning("MCP server '%s' missing url for sse transport", srv.name)
+            return 0
+
+        headers = srv.http_headers()
+        try:
+            tools: list[RemoteTool] = await list_tools_sse(url, headers=headers)
+        except Exception as exc:
+            logger.warning("MCP SSE discovery failed for %s: %s", url, exc)
+            return 0
+
+        added = 0
+        for remote in tools:
+            try:
+                proxy_cls = create_mcp_sse_proxy_tool_class(
+                    url=url,
+                    remote=remote,
+                    alias=srv.name,
+                    server_hint=srv.prompt,
+                    headers=headers,
+                )
+                self._available[proxy_cls.get_name()] = proxy_cls
+                added += 1
+            except Exception as exc:
+                logger.warning(
+                    "Failed to register MCP SSE tool '%s' from %s: %r",
+                    getattr(remote, "name", "<unknown>"),
+                    url,
                     exc,
                 )
         return added

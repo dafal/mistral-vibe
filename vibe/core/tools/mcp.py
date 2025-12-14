@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from mcp import ClientSession
+from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -123,6 +124,30 @@ async def call_tool_http(
             return _parse_call_result(url, tool_name, result)
 
 
+async def list_tools_sse(
+    url: str, headers: dict[str, str] | None = None
+) -> list[RemoteTool]:
+    async with sse_client(url, headers=headers) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools_resp = await session.list_tools()
+            return [RemoteTool.model_validate(t) for t in tools_resp.tools]
+
+
+async def call_tool_sse(
+    url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> MCPToolResult:
+    async with sse_client(url, headers=headers) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments)
+            return _parse_call_result(url, tool_name, result)
+
+
 def create_mcp_http_proxy_tool_class(
     *,
     url: str,
@@ -205,6 +230,90 @@ def create_mcp_http_proxy_tool_class(
 
     MCPHttpProxyTool.__name__ = f"MCP_{(alias or _alias_from_url(url))}__{remote.name}"
     return MCPHttpProxyTool
+
+
+def create_mcp_sse_proxy_tool_class(
+    *,
+    url: str,
+    remote: RemoteTool,
+    alias: str | None = None,
+    server_hint: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
+    from urllib.parse import urlparse
+
+    def _alias_from_url(url: str) -> str:
+        p = urlparse(url)
+        host = (p.hostname or "mcp").replace(".", "_")
+        port = f"_{p.port}" if p.port else ""
+        return f"{host}{port}"
+
+    published_name = f"{(alias or _alias_from_url(url))}_{remote.name}"
+
+    class MCPSseProxyTool(
+        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]
+    ):
+        description: ClassVar[str] = (
+            (f"[{alias}] " if alias else "")
+            + (remote.description or f"MCP tool '{remote.name}' from {url}")
+            + (f"\nHint: {server_hint}" if server_hint else "")
+        )
+        _mcp_url: ClassVar[str] = url
+        _remote_name: ClassVar[str] = remote.name
+        _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
+        _headers: ClassVar[dict[str, str]] = dict(headers or {})
+
+        @classmethod
+        def get_name(cls) -> str:
+            return published_name
+
+        @classmethod
+        def get_parameters(cls) -> dict[str, Any]:
+            return dict(cls._input_schema)
+
+        async def run(self, args: _OpenArgs) -> MCPToolResult:
+            try:
+                payload = args.model_dump(exclude_none=True)
+                return await call_tool_sse(
+                    self._mcp_url, self._remote_name, payload, headers=self._headers
+                )
+            except Exception as exc:
+                raise ToolError(f"MCP call failed: {exc}") from exc
+
+        @classmethod
+        def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
+            return ToolCallDisplay(
+                summary=f"{published_name}",
+                details=event.args.model_dump()
+                if hasattr(event.args, "model_dump")
+                else {},
+            )
+
+        @classmethod
+        def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
+            if not isinstance(event.result, MCPToolResult):
+                return ToolResultDisplay(
+                    success=False,
+                    message=event.error or event.skip_reason or "No result",
+                )
+
+            message = f"MCP tool {event.result.tool} completed"
+            details = {}
+            if event.result.text:
+                details["text"] = event.result.text
+            if event.result.structured:
+                details["structured"] = event.result.structured
+
+            return ToolResultDisplay(
+                success=event.result.ok, message=message, details=details
+            )
+
+        @classmethod
+        def get_status_text(cls) -> str:
+            return f"Calling MCP tool {remote.name}"
+
+    MCPSseProxyTool.__name__ = f"MCP_SSE_{(alias or _alias_from_url(url))}__{remote.name}"
+    return MCPSseProxyTool
 
 
 async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
